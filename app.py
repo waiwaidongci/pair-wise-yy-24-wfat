@@ -41,6 +41,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
         try:
             if parsed.path in ("/", "/index.html"):
                 data = (BASE / "static" / "index.html").read_bytes()
@@ -57,6 +58,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not date:
                     raise DomainError("缺少 date 参数")
                 return self._json(200, {"exceptions": self.db.get_exceptions(date)})
+            if parsed.path == "/api/reviews":
+                date = parse_qs(parsed.query).get("date", [""])[0]
+                return self._json(200, {"reviews": self.db.list_reviews(date or None)})
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "reviews" and parts[2].isdigit():
+                return self._json(200, {"review": self.db.get_review(int(parts[2]))})
             self._json(404, {"ok": False, "error": "接口不存在"})
         except DomainError as exc:
             self._json(400, {"ok": False, "error": str(exc)})
@@ -90,6 +96,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(201, {"ok": True, "id": log_id})
             if parsed.path == "/api/reconcile":
                 return self._json(200, {"ok": True, "exceptions": self.db.reconcile_date(str(body.get("date", "")))})
+            if parsed.path == "/api/reviews":
+                review = self.db.initiate_review(
+                    str(body.get("air_date", "")), str(body.get("note", "")), str(body.get("created_by", "")),
+                )
+                return self._json(201, {"ok": True, "review": review})
+            if len(parts) == 4 and parts[:2] == ["api", "reviews"] and parts[3] == "confirm":
+                result = self.db.confirm_review(
+                    int(parts[2]), int(body.get("version", 0)), str(body.get("confirmed_by", "")),
+                )
+                return self._json(200, {"ok": True, **result})
+            if len(parts) == 4 and parts[:2] == ["api", "reviews"] and parts[3] == "retry":
+                result = self.db.retry_review(int(parts[2]))
+                return self._json(200, {"ok": True, **result})
             if len(parts) == 4 and parts[:2] == ["api", "slots"] and parts[3] == "replace":
                 return self._json(200, {"ok": True, "slot": self.db.replace_slot(int(parts[2]), int(body.get("new_program_id", 0)))})
             if len(parts) == 4 and parts[:2] == ["api", "programs"] and parts[3] == "regions":
@@ -101,7 +120,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    RadioDB(DB_PATH).seed_demo()
+    db = RadioDB(DB_PATH)
+    db.seed_demo()
+    db.backfill_batches()
     port = int(os.environ.get("PORT", "8111"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Radio scheduling service: http://127.0.0.1:{port}")
