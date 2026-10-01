@@ -1,35 +1,163 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
-<title>电台排程</title>
+<title>电台排程 · 复核批次</title>
 <style>
-body{font:15px system-ui;max-width:1100px;margin:24px auto;padding:0 16px;background:#f7f7f5;color:#222}
+body{font:15px system-ui;max-width:1180px;margin:24px auto;padding:0 16px;background:#f7f7f5;color:#222}
 section{background:white;padding:16px;margin:12px 0;border:1px solid #ddd;border-radius:10px}
 input,select,button{padding:7px;margin:3px;border:1px solid #bbb;border-radius:6px}
-button{cursor:pointer;background:#16324f;color:white}pre{white-space:pre-wrap;max-height:360px;overflow:auto}
+button{cursor:pointer;background:#16324f;color:white}
+button.ghost{background:#eee;color:#16324f}
+button.warn{background:#8a4b00}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid input{width:90%}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top;font-size:14px}
+th{background:#eef2f6}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;color:#fff;background:#5a6b7b}
+.tag.open{background:#1d6fb8}.tag.confirmed{background:#2e7d32}.tag.draft{background:#8a4b00}
+.tag.pending{background:#b08900}.tag.confirmed-item{background:#2e7d32}
+.ok{color:#2e7d32}.bad{color:#b3261e}
+.muted{color:#777;font-size:13px}
+pre{white-space:pre-wrap;max-height:360px;overflow:auto}
+.blockers{color:#b3261e;margin:0;padding-left:18px}
+.intervals{font-family:ui-monospace,monospace}
+.diff td{font-size:13px}
 </style>
-<h1>电台播出与版权窗口排程</h1>
-<section><h2>当前计划</h2><button onclick="load()">刷新</button><pre id="state"></pre></section>
+<h1>电台播出与版权窗口排程 · 可恢复复核批次</h1>
+<section>
+  <h2>计划版本 <span id="planver" class="tag open">–</span>
+    <button class="ghost" onclick="load()">刷新</button></h2>
+  <div id="slots"></div>
+</section>
 <section><h2>新建节目</h2><div class="grid">
 <input id="title" placeholder="节目名"><select id="kind"><option>music</option><option>ad</option><option>talk</option><option>live</option></select>
 <input id="duration" type="number" value="30" placeholder="分钟"><input id="start" value="2026-01-01"><input id="end" value="2026-12-31">
 <input id="region" value="华东"><input id="sponsor" placeholder="赞助商，可空"><input id="cooldown" type="number" value="0" placeholder="冷却分钟">
 </div><button onclick="addProgram()">创建并授权地区</button></section>
-<section><h2>排期 / 替换 / 实播对账</h2>
+<section><h2>排期 / 替换 / 实播登记</h2>
 <div class="grid"><input id="airdate" value="2026-09-28"><input id="starttime" value="12:00"><input id="pid" type="number" placeholder="节目 ID">
 <input id="sid" type="number" placeholder="排期 ID"><input id="newpid" type="number" placeholder="替换节目 ID"><input id="actualstart" value="12:00">
 <input id="actualduration" type="number" value="30" placeholder="实播分钟"><input id="actualpid" type="number" placeholder="实播节目 ID，可空"></div>
-<button onclick="schedule()">排期</button><button onclick="replace()">替换</button><button onclick="playout()">记录实播</button><button onclick="reconcile()">对账</button><pre id="result"></pre></section>
+<button onclick="schedule()">排期</button><button onclick="replace()">替换</button><button onclick="playout()">登记实播</button>
+<pre id="result" class="muted"></pre></section>
+<section><h2>复核批次</h2>
+<div class="grid">
+<input id="rvdate" value="2026-09-28"><input id="rvregion" placeholder="地区，留空=全天">
+<input id="rvuser" placeholder="复核人">
+</div>
+<button onclick="startReview()">发起复核</button>
+<button class="ghost" onclick="reconcileLegacy()">按日期对账（旧入口）</button>
+<div id="batches"></div></section>
 <script>
-const api=async(url,body)=>{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();out(j);return j};
-const out=x=>document.querySelector('#result').textContent=JSON.stringify(x,null,2);
-async function load(){document.querySelector('#state').textContent=JSON.stringify(await (await fetch('/api/state')).json(),null,2)}
-function addProgram(){api('/api/programs',{title:title.value,kind:kind.value,duration_minutes:+duration.value,start_date:start.value,end_date:end.value,region:region.value,regions:[region.value],sponsor:sponsor.value||null,cooldown_minutes:+cooldown.value})}
-function schedule(){api('/api/schedule',{air_date:airdate.value,start_time:starttime.value,program_id:+pid.value,region:region.value})}
-function replace(){api('/api/slots/'+sid.value+'/replace',{new_program_id:+newpid.value})}
-function playout(){api('/api/playout',{slot_id:+sid.value,actual_start:actualstart.value,actual_duration_minutes:+actualduration.value,actual_program_id:actualpid.value?+actualpid.value:null})}
-function reconcile(){api('/api/reconcile',{date:airdate.value})}
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function call(url,body,method='POST'){
+  const opt={method,headers:{'Content-Type':'application/json'}};
+  if(body)opt.body=JSON.stringify(body);
+  const r=await fetch(url,opt),j=await r.json();
+  $('result').textContent=JSON.stringify(j,null,2);
+  if(!r.ok)throw new Error(j.error||'请求失败');
+  await load();return j;
+}
+function addProgram(){call('/api/programs',{title:title.value,kind:kind.value,duration_minutes:+duration.value,start_date:start.value,end_date:end.value,regions:[region.value],sponsor:sponsor.value||null,cooldown_minutes:+cooldown.value})}
+function schedule(){call('/api/schedule',{air_date:airdate.value,start_time:starttime.value,program_id:+pid.value,region:region.value})}
+function replace(){call('/api/slots/'+sid.value+'/replace',{new_program_id:+newpid.value})}
+function playout(){call('/api/playout',{slot_id:+sid.value,actual_start:actualstart.value,actual_duration_minutes:+actualduration.value,actual_program_id:actualpid.value?+actualpid.value:null})}
+function startReview(){call('/api/reviews',{air_date:rvdate.value,region:rvregion.value,created_by:rvuser.value})}
+function reconcileLegacy(){call('/api/reconcile',{date:rvdate.value})}
+function confirmNext(id){call(`/api/reviews/${id}/confirm`,{})}
+function submitBatch(id){
+  const results={};
+  document.querySelectorAll(`[data-verdict-batch="${id}"]`).forEach(sel=>{
+    const seq=sel.dataset.seq;
+    const note=document.querySelector(`[data-note-batch="${id}"][data-seq="${seq}"]`).value;
+    results[seq]={verdict:sel.value,note};
+  });
+  call(`/api/reviews/${id}/submit`,{submitted_by:rvuser.value||'页面',results});
+}
+
+function renderSlots(state){
+  $('planver').textContent='v'+state.plan_version;
+  const byDate={};
+  state.slots.forEach(s=>{(byDate[s.air_date]??=[]).push(s)});
+  let html='';
+  for(const date of Object.keys(byDate).sort()){
+    html+=`<h3>${date}</h3><table><tr><th>排期</th><th>节目</th><th>地区/时间</th>
+      <th>授权窗口</th><th>当天可播区间</th><th>阻断原因 / 状态</th></tr>`;
+    byDate[date].forEach(s=>{
+      const w=s.window||{};
+      const intervals=(w.intervals||[]).map(i=>`${i.start}–${i.end}`).join('、')||'<span class="bad">无可播时段</span>';
+      const blockers=(w.blockers||[]).length
+        ? `<ul class="blockers">${w.blockers.map(b=>`<li>${esc(b)}</li>`).join('')}</ul>`
+        : '<span class="ok">当前排期可播</span>';
+      html+=`<tr><td>#${s.id}<br><span class="muted">${esc(s.status)}</span></td>
+        <td>${esc(w.title)}<br><span class="muted">节目 #${s.program_id}</span></td>
+        <td>${esc(s.region)}<br>${s.start_time} · ${s.duration_minutes}分</td>
+        <td>${esc(w.license_start)} ~ ${esc(w.license_end)}<br>
+          ${w.region_authorized?'<span class="ok">地区已授权</span>':'<span class="bad">地区未授权</span>'}</td>
+        <td class="intervals">${intervals}</td><td>${blockers}</td></tr>`;
+    });
+    html+='</table>';
+  }
+  $('slots').innerHTML=html||'<p class="muted">还没有排期</p>';
+}
+
+function renderBatches(state){
+  if(!state.batches.length){$('batches').innerHTML='<p class="muted">还没有复核批次</p>';return}
+  $('batches').innerHTML=state.batches.map(b=>{
+    const pending=b.items.filter(i=>i.status==='pending').length;
+    const check=b.last_item_seq;
+    let head=`<h3><span class="tag ${b.status}">${b.status}</span> ${esc(b.batch_no)}
+      <span class="muted">#${b.id} · ${b.air_date}${b.region?' · '+esc(b.region):''} · 计划v${b.plan_version} · 重算${b.recompute_count}次</span></h3>
+      <p class="muted">检查点：已连续确认到第 ${check} 项 · 剩余 ${pending} 项待确认
+      ${b.legacy?' · 历史回填初始版本':''}${b.confirmed_by?' · 确认人：'+esc(b.confirmed_by):''}
+      ${b.status==='draft'?' · 基于 #'+b.based_on_batch_id+' 的后到草稿':''}</p>`;
+    let rows=b.items.map(i=>{
+      const w=i.window||{};
+      const intervals=(w.intervals||[]).map(x=>`${x.start}–${x.end}`).join('、');
+      const blockers=(w.blockers||[]).map(x=>esc(x)).join('；')||'<span class="ok">无</span>';
+      const exc=(i.exceptions||[]).map(e=>`${e.kind}: ${esc(e.detail)}`).join('<br>')||'<span class="ok">无异常</span>';
+      const existing=i.result&&i.result.verdict?i.result.verdict:(i.exceptions&&i.exceptions.length?'exception':'ok');
+      const verdict=b.status==='confirmed'
+        ? `<span class="tag confirmed-item">${esc(i.result&&i.result.verdict||'已确认')}</span>`
+        : `<select data-verdict-batch="${b.id}" data-seq="${i.seq}">
+             <option value="ok"${existing==='ok'?' selected':''}>通过</option>
+             <option value="exception"${existing==='exception'?' selected':''}>确认异常</option>
+             <option value="waived"${existing==='waived'?' selected':''}>豁免</option>
+           </select>`;
+      return `<tr><td>${i.seq}</td><td>#${i.slot_id}</td><td>${esc(w.title)}</td>
+        <td>${esc(w.license_start)}~${esc(w.license_end)}<br><span class="intervals">${intervals}</span></td>
+        <td>${blockers}</td><td>${exc}</td>
+        <td><span class="tag ${i.status}">${i.status==='confirmed'?'已确认':'待确认'}</span>
+          ${i.result&&i.result.note?'<br><span class="muted">'+esc(i.result.note)+'</span>':''}</td>
+        <td>${verdict}
+          <input data-note-batch="${b.id}" data-seq="${i.seq}" placeholder="复核意见"
+            value="${esc(i.result&&i.result.note||'')}" style="width:110px"
+            ${b.status==='confirmed'?'disabled':''}></td></tr>`;
+    }).join('');
+    let diff='';
+    if(b.status==='draft'&&b.diff&&b.diff.length){
+      diff=`<table class="diff"><tr><th>项</th><th>排期</th><th>字段</th><th>先到结果</th><th>你的结果</th></tr>`+
+        b.diff.map(d=>`<tr><td>${d.seq}</td><td>#${d.slot_id}</td><td>${esc(d.field)}</td>
+          <td class="ok">${esc(d.winner)||'（空）'}</td><td class="bad">${esc(d.yours)||'（空）'}</td></tr>`).join('')+
+        `</table>`;
+    }
+    let actions='';
+    if(b.status==='open'){
+      actions=`<button class="ghost" onclick="confirmNext(${b.id})">从检查点确认下一项</button>
+        <button onclick="submitBatch(${b.id})">确认全部并提交批次</button>`;
+    }
+    return `<div style="border-top:2px solid #e3e8ee;padding:6px 0">${head}
+      <table><tr><th>序</th><th>排期</th><th>节目</th><th>授权窗口/可播区间</th>
+      <th>阻断原因</th><th>对账结果</th><th>状态</th><th>复核</th></tr>${rows}</table>
+      ${diff}${actions}</div>`;
+  }).join('');
+}
+
+async function load(){
+  const state=await (await fetch('/api/state')).json();
+  renderSlots(state);renderBatches(state);
+}
 load();
 </script>
 </html>

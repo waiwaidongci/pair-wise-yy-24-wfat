@@ -41,6 +41,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
         try:
             if parsed.path in ("/", "/index.html"):
                 data = (BASE / "static" / "index.html").read_bytes()
@@ -57,8 +58,22 @@ class Handler(BaseHTTPRequestHandler):
                 if not date:
                     raise DomainError("缺少 date 参数")
                 return self._json(200, {"exceptions": self.db.get_exceptions(date)})
+            if parsed.path == "/api/reviews":
+                date = parse_qs(parsed.query).get("date", [None])[0]
+                return self._json(200, {"batches": self.db.list_batches(date)})
+            if len(parts) == 3 and parts[:2] == ["api", "reviews"]:
+                return self._json(200, {"batch": self.db.get_batch(int(parts[2]))})
+            if (len(parts) == 4 and parts[:2] == ["api", "programs"]
+                    and parts[3] == "window"):
+                query = parse_qs(parsed.query)
+                if "date" not in query or "region" not in query:
+                    raise DomainError("缺少 date 或 region 参数")
+                return self._json(200, {"window": self.db.program_window(
+                    int(parts[2]), query["date"][0], query["region"][0],
+                    query.get("start_time", [None])[0],
+                )})
             self._json(404, {"ok": False, "error": "接口不存在"})
-        except DomainError as exc:
+        except (DomainError, ValueError) as exc:
             self._json(400, {"ok": False, "error": str(exc)})
 
     def do_POST(self):
@@ -89,7 +104,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return self._json(201, {"ok": True, "id": log_id})
             if parsed.path == "/api/reconcile":
-                return self._json(200, {"ok": True, "exceptions": self.db.reconcile_date(str(body.get("date", "")))})
+                batch = self.db.start_review(str(body.get("date", "")))
+                return self._json(200, {"ok": True, "batch_id": batch["id"], "batch_no": batch["batch_no"],
+                                        "exceptions": self.db.get_exceptions(str(body.get("date", "")))})
+            if parsed.path == "/api/reviews":
+                batch = self.db.start_review(
+                    str(body.get("air_date", body.get("date", ""))), str(body.get("region", "")),
+                    str(body.get("created_by", "")),
+                )
+                return self._json(201, {"ok": True, "batch": batch})
+            if len(parts) == 4 and parts[:2] == ["api", "reviews"] and parts[3] == "confirm":
+                seq = body.get("seq")
+                batch = self.db.confirm_item(int(parts[2]), int(seq) if seq is not None else None)
+                return self._json(200, {"ok": True, "batch": batch})
+            if len(parts) == 4 and parts[:2] == ["api", "reviews"] and parts[3] == "submit":
+                return self._json(200, self.db.submit_batch(
+                    int(parts[2]), str(body.get("submitted_by", "")), body.get("results") or {},
+                ))
             if len(parts) == 4 and parts[:2] == ["api", "slots"] and parts[3] == "replace":
                 return self._json(200, {"ok": True, "slot": self.db.replace_slot(int(parts[2]), int(body.get("new_program_id", 0)))})
             if len(parts) == 4 and parts[:2] == ["api", "programs"] and parts[3] == "regions":
